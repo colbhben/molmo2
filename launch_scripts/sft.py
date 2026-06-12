@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import os
+import sys
 from dataclasses import asdict
 from os.path import join
 from typing import List
@@ -454,8 +455,16 @@ def get_training_mixture(name):
         training_mixture = [
             ["gaze", [WeightedDataset("gaze_video_point", sampling_rate=1.0,
                                       message_weight=point_weight)], gaze_w],
-            ["rehearse", rehearse_datasets, rehearse_w],
         ]
+        # Gaze-only: with GAZE_SPECIALIZE_RATIO=1.0 (rehearse_w==0) we DROP the rehearse group
+        # entirely instead of adding it with weight 0 -- otherwise its datasets are still
+        # constructed (and load_from_disk'd) just to be sampled at rate 0. This lets you
+        # validate the gaze-only train path before the rehearsal SFT data is downloaded.
+        if rehearse_w > 0:
+            training_mixture.append(["rehearse", rehearse_datasets, rehearse_w])
+        else:
+            print("GAZE_SPECIALIZE_RATIO=1.0: rehearse group dropped (gaze-only training).",
+                  file=sys.stderr)
     else:
         raise NotImplementedError(name)
     root_size_mixture: List[KwargsMixture] = []
