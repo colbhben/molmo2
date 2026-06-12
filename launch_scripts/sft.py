@@ -1,5 +1,6 @@
 import argparse
 import dataclasses
+import os
 from dataclasses import asdict
 from os.path import join
 from typing import List
@@ -423,6 +424,38 @@ def get_training_mixture(name):
             ["nlp", ["tulu4"], 0.1 - hardcode_weight],
             ["hardcodes", ["molmo2_hardcodes"], hardcode_weight]
         ]
+    elif name.startswith("gaze_specialize") or name == "gaze_rehearse":
+        # Specialize-then-rehearse: train mostly on gaze (the new task) while rehearsing a
+        # slice of the general SFT mixture to avoid catastrophic forgetting. Default blend
+        # is 92% gaze / 8% rehearse (Molmo2-recommended); override via GAZE_SPECIALIZE_RATIO.
+        # "gaze_rehearse" is an alias that just pins the same blend explicitly.
+        try:
+            gaze_w = float(os.environ.get("GAZE_SPECIALIZE_RATIO", "0.92"))
+        except ValueError:
+            gaze_w = 0.92
+        gaze_w = min(max(gaze_w, 0.0), 1.0)
+        rehearse_w = 1.0 - gaze_w
+        # Token weighting for point/caption messages, mirroring the molmo2 mixture so the
+        # rehearsal data is weighted the way it was in pretraining-style SFT.
+        point_weight = MessageWeight(weight=0.2, root_length=False, root_subsegments=False)
+        cap_weight = MessageWeight(weight=0.1, root_length=False, root_subsegments=False)
+        # Rehearse submixture: a compact, representative slice of the general mixture spanning
+        # the core modalities (text instruction-following, image VQA, image+video pointing,
+        # video understanding, hardcodes). Internal weights are normalized within the group;
+        # the group as a whole gets `rehearse_w`. Override the group list by editing here.
+        rehearse_datasets = [
+            WeightedDataset("tulu4", sampling_rate=0.30),
+            WeightedDataset("pixmo_ask_model_anything", sampling_rate=0.15, message_weight=cap_weight),
+            WeightedDataset("chart_qa_weighted", sampling_rate=0.15),
+            WeightedDataset("pixmo_points_train", sampling_rate=0.15, message_weight=point_weight),
+            WeightedDataset("llava_video_mc_academic", sampling_rate=0.20),
+            WeightedDataset("molmo2_hardcodes", sampling_rate=0.05),
+        ]
+        training_mixture = [
+            ["gaze", [WeightedDataset("gaze_video_point", sampling_rate=1.0,
+                                      message_weight=point_weight)], gaze_w],
+            ["rehearse", rehearse_datasets, rehearse_w],
+        ]
     else:
         raise NotImplementedError(name)
     root_size_mixture: List[KwargsMixture] = []
@@ -452,6 +485,12 @@ def main():
     if args.mixture == "debug":
         loss_eval_tasks = ["llava_video_oe_academic", "pixmo_ask_model_anything"]
         eval_tasks = ["chart_qa", "mvbench", "mevis_track_eval_1fps:test"]
+    elif args.mixture.startswith("gaze"):
+        # Gaze smoke run: the only inference metric that matters is gaze L2 / accuracy@radius
+        # on the held-out gaze val split. Keep loss evals empty (the gaze val loss is implicit
+        # in the inf eval) to keep the smoke run light.
+        loss_eval_tasks = []
+        eval_tasks = ["gaze_video_point_eval"]
     elif args.mixture.startswith("pointing"):
         loss_eval_tasks = []
         eval_tasks = ["pointing_eval_v2:test", "vixmo_points_count:val", "pixmo_count_counting:validation"]

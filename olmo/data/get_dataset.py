@@ -31,6 +31,7 @@ from olmo.data.molmo2_datasets import (
 )
 from olmo.data.molmo2_video_track_datasets import Molmo2VideoTrackInstruction, Molmo2VideoTrackEval, \
     MolmoPointTrackAny, MolmoPointTrackSyn
+from olmo.data.gaze_datasets import GazeVideoPoint, GazeVideoPointEval
 from olmo.data.molmo_hardcode import Molmo2HardCodes
 from olmo.data.pixmo_datasets import PixMoMultiPoints, PixMoCapQa, PixMoCount, PixMoCap, \
     PixMoAskModelAnything, PixMoPoints, PixmoMultiImageQa, PixMoPointsEval
@@ -251,6 +252,13 @@ def get_dataset_by_name(dataset_name, split) -> Dataset:
             use_clips_from_metadata=True,
             max_seconds=63
         )
+    # Gaze video-point: annotation is the INPUT prompt; gaze point(s) are the OUTPUT target.
+    # Objective ("first" vs "all") and split name come from GAZE_OBJECTIVE / GAZE_SPLIT_NAME
+    # env vars (set by the launcher) so one registration serves every objective/split.
+    if dataset_name == "gaze_video_point":
+        return GazeVideoPoint(split=split)
+    if dataset_name == "gaze_video_point_eval":
+        return GazeVideoPointEval(split=split)
     if dataset_name in ["molmo2_video_point_eval", "vixmo_points_point_eval"]:
         return Molmo2VideoPointEval(split=split)
     if dataset_name in ["molmo2_video_count_eval", "vixmo_points_count_clip_63s"]:

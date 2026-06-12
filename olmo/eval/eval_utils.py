@@ -198,6 +198,9 @@ def get_evaluator(name) -> EvaluatorConfig:
         return EvaluatorConfig(vixmo_point_count_eval=True)
     elif name == "vixmo_points_point_eval":
         return EvaluatorConfig(vixmo_point_eval=True)
+    elif name == "gaze_video_point_eval" or name.startswith("gaze_video_point"):
+        # Gaze L2 + accuracy@radius (regression-style, no masks).
+        return EvaluatorConfig(gaze_point_eval=True)
     elif name.startswith("screen_spot_v2"):
         return EvaluatorConfig(screen_spot_evaluator=True)
     elif name.startswith("os_worldg"):
@@ -315,6 +318,10 @@ def get_default_max_tokens(name):
         "vixmo_points_point_eval"
     ]:
         max_new_tokens = 2048
+    elif name.startswith("gaze_video_point"):
+        # "first" objective is a single point (tiny); "all" emits one point per frame.
+        # 1024 covers a multi-second clip's worth of <points coords=...> output.
+        max_new_tokens = 1024
     elif "track" in name:
         max_new_tokens = 4096
     else:

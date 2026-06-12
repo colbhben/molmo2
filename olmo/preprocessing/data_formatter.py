@@ -517,6 +517,15 @@ GENERAL_PROMPTS_V1["video_multiple_choice"] = GENERAL_PROMPTS_V1["multiple_choic
 #TODO: ablate over video multiple choice with subtitles: specific templates vs normal multiple choice templates
 GENERAL_PROMPTS_V1["video_multiple_choice_w_subtitle"] =GENERAL_PROMPTS_V1["multiple_choice"]
 GENERAL_PROMPTS_V1["video_point"] = [prompt.replace("image", "video").replace("picture", "video").replace("photo", "video") for prompt in GENERAL_PROMPTS_V1["pointing"]]
+# Gaze pointing: the annotation ({label}) is fed as INPUT context with the video; the
+# OUTPUT/target is the camera wearer's gaze point(s) only. Used by the gaze dataset.
+GENERAL_PROMPTS_V1["video_gaze_point"] = [
+    "Given the activity \"{label}\", point to where the camera wearer is looking.",
+    "The camera wearer is: {label}. Point to where they are looking.",
+    "Context: {label}\nPoint to where the camera wearer is looking in the video.",
+    "While \"{label}\", where is the camera wearer looking? Point to it.",
+    "Point to the camera wearer's gaze. Context: {label}",
+]
 GENERAL_PROMPTS_V1["video_point_count"] = [prompt.replace("image", "video").replace("picture", "video").replace("photo", "video") for prompt in GENERAL_PROMPTS_V1["point_count"]]
 GENERAL_PROMPTS_V1["video_count"] = [prompt.replace("image", "video").replace("picture", "video").replace("photo", "video") for prompt in GENERAL_PROMPTS_V1["only_count"]]
 GENERAL_PROMPTS_V1["video_count_point"] = [prompt.replace("image", "video").replace("picture", "video").replace("photo", "video") for prompt in GENERAL_PROMPTS_V1["count_then_point"]]
@@ -681,6 +690,7 @@ DEMO_STYLES = [
     "correction_qa",
     "text_sft",
     "video_point",
+    "video_gaze_point",
     "video_point_count",
     "video_count",
     "video_count_point",
@@ -1254,6 +1264,10 @@ class DataFormatter(BaseConfig):
         style = example["style"]
         assert style.startswith("video_")
         mode = style[6:]
+        # video_gaze_point: gaze target is points-only (no count). Map to the plain "point"
+        # output mode -- the annotation went into the INPUT prompt, the OUTPUT is just points.
+        if mode == "gaze_point":
+            mode = "point"
         all_points = [[[p["x"], p["y"]] for p in fr] for fr in all_points]
         return self._point_formatter.format_video_points(all_timestamps, all_points, 100, example["label"], mode=mode)
 
@@ -1766,6 +1780,7 @@ class DataFormatter(BaseConfig):
                 prompt, output = self.format_video_object_track_points(example, is_training, rng)
             elif style in [
                     "video_point",
+                    "video_gaze_point",
                     "video_point_count",
                     "video_count",
                     "video_count_point",
@@ -1773,6 +1788,8 @@ class DataFormatter(BaseConfig):
                 if "question" in example:
                     prompt = example["question"]
                 else:
+                    # video_gaze_point: the annotation is the INPUT context ({label} in the
+                    # prompt template); the OUTPUT is the gaze point string only.
                     prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1[style], example, rng, dbg=self.debug)
                 output = self.format_video_points(example)
                 metadata = example.get("metadata", {})

@@ -20,7 +20,7 @@ from .evaluators import (
     VinogroundEval, VixMoCaptionEval, QVHighlightsEval,
     TomatoEval, TemporalBenchEval, Dream1KCaptionEval, MMEVideoOCREval, VideoHallucerEval,
     MMIUEval, LVBenchEval, MulSetEval, Ego3dBenchEval, VSIBenchEval,
-    VideoObjectTrackingEval, VixMoPointCountEval, VixMoPointEval,
+    VideoObjectTrackingEval, VixMoPointCountEval, VixMoPointEval, GazePointEval,
     PointBenchEval, ScreenSpotProEvaluator, ScreenSpotEvaluator, OsWorldGEvaluator
 )
 from .open_ended_qa_eval import OpenQaEvaluator
@@ -224,6 +224,7 @@ class EvaluatorConfig(BaseConfig):
     dream1k_caption_eval: bool = False
     vixmo_point_count_eval: bool = False
     vixmo_point_eval: bool = False
+    gaze_point_eval: bool = False
 
     """ Video Object Tracking evaluation """
     video_object_tracking_eval: str = '' # path with object tracking predictions
@@ -321,6 +322,8 @@ class EvaluatorConfig(BaseConfig):
             evaluators.append(VSIBenchEval(self.num_wandb_examples))
         if self.vixmo_point_count_eval:
             evaluators.append(VixMoPointCountEval(self.num_wandb_examples))
+        if self.gaze_point_eval:
+            evaluators.append(GazePointEval(self.num_wandb_examples))
         if self.vixmo_point_eval:
             evaluators.append(VixMoPointEval(self.num_wandb_examples))
         elif self.os_worldg_evaluation:

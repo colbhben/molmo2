@@ -2901,6 +2901,87 @@ class VixMoPointEval(Evaluator):
         return out
 
 
+class GazePointEval(Evaluator):
+    """Gaze video-point eval: L2 distance + accuracy@radius (no masks).
+
+    Unlike VixMoPointEval (object counting/detection with masks), gaze is a single
+    continuous target per frame, so we score regression-style:
+      * l2: mean Euclidean distance between predicted and GT gaze in NORMALIZED [0,100]
+            space (so it's resolution-independent and comparable across datasets);
+      * acc@R: fraction of GT points with a predicted point within radius R (in the same
+            0-100 units) -- reported for a few radii;
+      * valid: fraction of examples that produced any parseable predicted point.
+    Predictions and GT are matched by bipartite assignment on (x, y) within each example
+    (timestamp is informational; the dominant "first" objective has a single point).
+    GT comes from metadata.gt_abs_triplets (pixel); predictions parse back to pixel via
+    metadata.video_{width,height}. Both are normalized to 0-100 before scoring.
+    """
+
+    RADII = (5.0, 10.0, 15.0)  # accuracy@radius thresholds, in 0-100 normalized units
+
+    def __init__(self, n_to_log=None):
+        self.n_to_log = n_to_log
+
+    def __call__(self, metadatas, predictions, tokenizer, step=None):
+        response_text = predictions["predictions_text"]
+        scores = defaultdict(list)
+        all_pred_triplets, all_gt_triplets = [], []
+        for ex_ix, pred in enumerate(response_text):
+            metadata = metadatas[ex_ix]
+            gt_abs_triplets = metadata["gt_abs_triplets"]
+            video_duration = metadata["video_duration"]
+            video_h, video_w = metadata["video_height"], metadata["video_width"]
+            if isinstance(pred, str):
+                pred_abs_triplets = extract_multi_image_points(pred, image_w=video_w, image_h=video_h)
+            else:
+                pred_abs_triplets = pred if isinstance(pred, list) else []
+
+            all_pred_triplets.append(pred_abs_triplets)
+            all_gt_triplets.append(gt_abs_triplets)
+            scores["valid"].append(float(len(pred_abs_triplets) > 0))
+            if len(gt_abs_triplets) == 0:
+                continue
+
+            gt_norm = normalize_timestamps_and_points(
+                gt_abs_triplets, video_duration=video_duration,
+                video_h=video_h, video_w=video_w, upper_bound=100, num_decimals=3)
+            if len(pred_abs_triplets) == 0:
+                # No prediction: max miss for every radius, no L2 contribution.
+                for r in self.RADII:
+                    scores[f"acc@{r:g}"].append(0.0)
+                continue
+            pred_norm = normalize_timestamps_and_points(
+                pred_abs_triplets, video_duration=video_duration,
+                video_h=video_h, video_w=video_w, upper_bound=100, num_decimals=3)
+
+            # Bipartite match on (x, y) only -- gaze targets are spatial; timestamps just
+            # order multi-point ("all") examples and shouldn't dominate the distance.
+            pred_xy = np.array([[x, y] for _, x, y in pred_norm], dtype=np.float64)
+            gt_xy = np.array([[x, y] for _, x, y in gt_norm], dtype=np.float64)
+            dists = cdist(pred_xy, gt_xy)
+            row_ind, col_ind = linear_sum_assignment(dists)
+            matched = dists[row_ind, col_ind]
+            # L2 averaged over MATCHED GT points (unmatched GT, if pred<gt, count as misses
+            # for accuracy but not for L2 -- L2 is a localization metric on what was found).
+            for d in matched:
+                scores["l2"].append(float(d))
+            n_gt = len(gt_xy)
+            for r in self.RADII:
+                hits = int(np.sum(matched <= r))
+                scores[f"acc@{r:g}"].append(hits / n_gt)
+
+        out = {k: mean_metric(v) for k, v in scores.items()}
+        if self.n_to_log:
+            per_example = [{k: scores[k][i] for k in scores if i < len(scores[k])}
+                           for i in range(len(response_text))]
+            out["predictions"] = gather_examples_as_html(
+                self.n_to_log, tokenizer, metadatas, predictions, per_example,
+                pred_times_and_points=all_pred_triplets,
+                gt_times_and_points=all_gt_triplets,
+            )
+        return out
+
+
 class PointBenchEval(Evaluator):
     CATEGORIES = ["affordable", "counting", "reasoning", "spatial", "steerable"]
 
