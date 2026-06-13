@@ -328,8 +328,8 @@ class Trainer:
                 "or set 'FS_LOCAL_RANK' to the global rank for each process."
             )
 
-        dp_process_group = get_dp_process_group(self.mesh) if self.mesh is not None else None
-        self.dp_world_size = get_world_size(dp_process_group) if dp_process_group is not None else get_world_size()
+        self.dp_process_group = get_dp_process_group(self.mesh) if self.mesh is not None else None
+        self.dp_world_size = get_world_size(self.dp_process_group) if self.dp_process_group is not None else get_world_size()
         self.cp_degree = get_world_size() // self.dp_world_size
         self.cp_enabled = self.cp_degree > 1
 
@@ -495,13 +495,17 @@ class Trainer:
             # light-weight and that will ensure things will work if we resume from
             # a different world size
             worker_states = list(self._data_worker_states.values())
-            if get_world_size() > 1:
-                states = [None] * get_world_size()
-                dist.all_gather_object(states, worker_states)
+            # Under context parallelism, every rank in a CP group shares ONE dataloader, so only
+            # the DP ranks hold distinct worker states. Gather over the DP group (not all ranks)
+            # and size the checkpoint by dp_world_size, else the IterableDataMixtureCheckpoint
+            # assert (len == world_size*num_workers) fails when cp_degree > 1.
+            if self.dp_world_size > 1:
+                states = [None] * self.dp_world_size
+                dist.all_gather_object(states, worker_states, group=self.dp_process_group)
                 worker_states = flatten_lists(states)
             num_workers = self.cfg.data.num_workers or 1
             data_checkpoint = IterableDataMixtureCheckpoint(
-                worker_states, get_world_size(), num_workers, next_worker_id=self.global_step % num_workers)
+                worker_states, self.dp_world_size, num_workers, next_worker_id=self.global_step % num_workers)
         else:
             data_checkpoint = None
 
@@ -570,7 +574,7 @@ class Trainer:
             checkpoint = state_dict["data_checkpoint"]
             self.dataset.dataset.resume_from = checkpoint
             if (
-                checkpoint.world_size != get_world_size() or
+                checkpoint.world_size != self.dp_world_size or
                 checkpoint.num_workers != (1 or self.cfg.data.num_workers)
             ):
                 log.warning("Num workers/world size has changed, the order of "
