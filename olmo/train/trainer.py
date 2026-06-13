@@ -504,6 +504,16 @@ class Trainer:
                 dist.all_gather_object(states, worker_states, group=self.dp_process_group)
                 worker_states = flatten_lists(states)
             num_workers = self.cfg.data.num_workers or 1
+            # A DataLoader worker only records a WorkerState once it YIELDS a packed batch. With
+            # heavy packing (buffer_size) and few steps, some of the dp_world_size*num_workers
+            # workers may not have emitted anything yet, so worker_states is incomplete -- which
+            # trips IterableDataMixtureCheckpoint's contiguous-id assert (and would corrupt the
+            # `on_example % num_global_workers` resume mapping). Pad the missing workers with a
+            # fresh "seen nothing" state (on_example=-1) so the full 0..N-1 set is present.
+            expected_ids = set(range(self.dp_world_size * num_workers))
+            present_ids = {ws.worker_global_id for ws in worker_states}
+            for missing_id in expected_ids - present_ids:
+                worker_states.append(WorkerState(missing_id, on_example=-1, skipped_example_ids=[]))
             data_checkpoint = IterableDataMixtureCheckpoint(
                 worker_states, self.dp_world_size, num_workers, next_worker_id=self.global_step % num_workers)
         else:
