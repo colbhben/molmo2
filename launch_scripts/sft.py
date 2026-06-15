@@ -623,6 +623,12 @@ def main():
         args.num_workers = 2
         args.prefetch_factor = 2
 
+    # For gaze runs we want the held-out gaze metrics (L2 / acc@radius / valid) AND a
+    # handful of prediction visualizations published to wandb. num_wandb_examples controls
+    # how many per-example gaze prediction cards get logged (GazePointEval renders them).
+    is_gaze = args.mixture.startswith("gaze")
+    gaze_num_wandb_examples = 8 if is_gaze else 0
+
     num_workers = args.num_workers
     evaluations = []
     for task in eval_tasks:
@@ -632,6 +638,7 @@ def main():
             device_batch_size=args.device_batch_size*2,
             max_examples=args.max_inf_eval_examples,
             num_workers=num_workers,
+            num_wandb_examples=gaze_num_wandb_examples if task == "gaze_video_point_eval" else 0,
         )
         evaluation.data.pad = None
         evaluation.data.max_text_seq_len = 128  # Only needs to be enough for the question
@@ -655,7 +662,14 @@ def main():
         evaluation.data.prefetch_factor = args.prefetch_factor
         loss_evaluations.append(evaluation)
 
-    log_interval = 1 if args.debug else 20
+    # Logging cadence. For gaze runs (which are short specialize smokes / fine-tunes) we
+    # log every step so train loss, perplexity, throughput and per-group LRs are visible in
+    # wandb in realtime -- the default 20-step interval publishes nothing on a short run.
+    log_interval = 1 if (args.debug or is_gaze) else 20
+    # How often to run the gaze inference eval (L2 / acc@radius / valid + prediction cards).
+    # Default sft.py leaves this disabled (-1); enable it for gaze so the metric we actually
+    # care about is logged. Override with `inf_eval_interval=<n>` after `--` on the CLI.
+    gaze_inf_eval_interval = 4 if is_gaze else -1
     cfg = TrainConfig(
         run_name="multitask_train",
         save_folder=omegaconf.MISSING,
@@ -730,8 +744,9 @@ def main():
         softmax_auxiliary_loss_scale=1e-4,
         inf_evaluators=evaluations,
         evaluators=loss_evaluations,
-        inf_eval_interval=-1,
+        inf_eval_interval=gaze_inf_eval_interval,
         eval_interval=-1,
+        eval_on_last_step=True,
         save_final_unsharded_checkpoint=False,
         save_final_optim=False,
         response_logits_only=True,
