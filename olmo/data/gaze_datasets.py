@@ -204,6 +204,10 @@ class GazeVideoPoint(DatasetBase):
             "dataset": row.get("dataset"),
             "gaze_objective": self.objective,
             "example_id": row["id"],
+            # The activity annotation (the prompt context). Carried in metadata too so the
+            # gaze evaluator can show it in the wandb prediction table ("ground truth
+            # annotation" column) -- the evaluator only receives `metadata`, not the example.
+            "label": label,
             "points": sorted_points,
             "timestamps": rel_ts,
             # --- GazePointEval inputs (L2 + accuracy@radius) --------------------------
@@ -213,6 +217,9 @@ class GazeVideoPoint(DatasetBase):
             "video_duration": clip_dur if clip_dur and clip_dur > 0 else 1.0,
             "video_height": side,
             "video_width": side,
+            # Absolute path to the clip, so the gaze evaluator can render a wandb.Video
+            # with GT (green) + predicted (blue) gaze points overlaid per frame.
+            "video_path": self._resolve_video(row["video"]),
         }
         # Only set clip bounds when the duration is real & positive. The preprocessor reads
         # clip = (clip_start_time, clip_end_time) whenever clip_start_time is not None, so a
@@ -231,6 +238,9 @@ class GazeVideoPoint(DatasetBase):
             "points": sorted_points,
             "timestamps": rel_ts,
             "video": self._resolve_video(row["video"]),
+            # Top-level too (not just in metadata) so the data formatter can pick the
+            # objective-aware gaze prompt ("all" => one point per frame; "first" => first frame).
+            "gaze_objective": self.objective,
             "metadata": metadata,
         }
 

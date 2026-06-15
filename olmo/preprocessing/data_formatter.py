@@ -519,12 +519,36 @@ GENERAL_PROMPTS_V1["video_multiple_choice_w_subtitle"] =GENERAL_PROMPTS_V1["mult
 GENERAL_PROMPTS_V1["video_point"] = [prompt.replace("image", "video").replace("picture", "video").replace("photo", "video") for prompt in GENERAL_PROMPTS_V1["pointing"]]
 # Gaze pointing: the annotation ({label}) is fed as INPUT context with the video; the
 # OUTPUT/target is the camera wearer's gaze point(s) only. Used by the gaze dataset.
+# Gaze prompts come in two objective-specific flavors (selected at format time by the
+# example's `gaze_objective`):
+#  - "first": predict a SINGLE gaze point, for the FIRST frame of the clip. The wording is
+#    explicit about "the first frame" so the singular target is unambiguous.
+#  - "all": predict ONE gaze point PER FRAME across the whole clip (a timestamped sequence),
+#    matching the per-frame target the "all" objective builds.
+# Gaze prompts borrow the Molmo2 point-tracking pretraining prompt FRAMING (role preamble + 2FPS
+# phrasing + per-frame intent) so the task sits close to what the released checkpoint saw -- but
+# the OUTPUT is the native <points coords="..."> tag the model was pretrained to emit (NOT JSON;
+# measured cheaper to learn, ~16 vs ~25 tok/point), so the prompts deliberately do NOT dictate a
+# JSON output schema. The "do not point to the same object twice" pretraining rule is dropped
+# (gaze revisits the same region across frames). Two objective flavors:
+#  - "first": a SINGLE gaze point for the FIRST frame (wording is explicit about the first frame).
+#  - "_all": ONE gaze point PER FRAME across the clip (timestamped sequence).
 GENERAL_PROMPTS_V1["video_gaze_point"] = [
-    "Given the activity \"{label}\", point to where the camera wearer is looking.",
-    "The camera wearer is: {label}. Point to where they are looking.",
-    "Context: {label}\nPoint to where the camera wearer is looking in the video.",
-    "While \"{label}\", where is the camera wearer looking? Point to it.",
-    "Point to the camera wearer's gaze. Context: {label}",
+    "You are a video-analysis assistant that points to where the camera wearer is looking. "
+    "Given the activity \"{label}\", point to the camera wearer's gaze in the first frame of the video.",
+    "You point to where the camera wearer is looking in egocentric video. The camera wearer is: "
+    "{label}. Point to their gaze in the first frame.",
+    "Context: {label}\nAs a gaze-pointing assistant, point to where the camera wearer is looking "
+    "in the first frame of the video.",
+]
+GENERAL_PROMPTS_V1["video_gaze_point_all"] = [
+    "You are a video-analysis assistant that points to where the camera wearer is looking at 2 FPS. "
+    "Given the activity \"{label}\", point to the camera wearer's gaze in every frame of the video, "
+    "giving one point per frame.",
+    "You point to where the camera wearer is looking throughout an egocentric video. The camera "
+    "wearer is: {label}. Track their gaze across the whole video, giving one point for each frame.",
+    "Context: {label}\nAs a gaze-pointing assistant, point to where the camera wearer is looking "
+    "in each frame of the video, one timestamped point per frame.",
 ]
 GENERAL_PROMPTS_V1["video_point_count"] = [prompt.replace("image", "video").replace("picture", "video").replace("photo", "video") for prompt in GENERAL_PROMPTS_V1["point_count"]]
 GENERAL_PROMPTS_V1["video_count"] = [prompt.replace("image", "video").replace("picture", "video").replace("photo", "video") for prompt in GENERAL_PROMPTS_V1["only_count"]]
@@ -1266,6 +1290,10 @@ class DataFormatter(BaseConfig):
         mode = style[6:]
         # video_gaze_point: gaze target is points-only (no count). Map to the plain "point"
         # output mode -- the annotation went into the INPUT prompt, the OUTPUT is just points.
+        # We deliberately use the NATIVE <points coords="t id x y;..."> tag (not JSON): it is the
+        # exact format the released checkpoint was PRETRAINED to emit, so it carries the strongest
+        # prior and converges fastest. (Measured: the tag is ~16 tok/point vs ~25 for verbose
+        # JSON.) The prompt prose still mirrors the pretraining point-tracking framing.
         if mode == "gaze_point":
             mode = "point"
         all_points = [[[p["x"], p["y"]] for p in fr] for fr in all_points]
@@ -1789,8 +1817,17 @@ class DataFormatter(BaseConfig):
                     prompt = example["question"]
                 else:
                     # video_gaze_point: the annotation is the INPUT context ({label} in the
-                    # prompt template); the OUTPUT is the gaze point string only.
-                    prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1[style], example, rng, dbg=self.debug)
+                    # prompt template); the OUTPUT is the gaze point string only. The prompt
+                    # is objective-aware: "all" asks for one point PER FRAME, "first" asks for
+                    # a single point on the first frame. (gaze_objective is set by the dataset;
+                    # default "first".)
+                    prompt_style = style
+                    if style == "video_gaze_point":
+                        objective = example.get("gaze_objective") \
+                            or example.get("metadata", {}).get("gaze_objective", "first")
+                        if objective == "all":
+                            prompt_style = "video_gaze_point_all"
+                    prompt = apply_keyword_prompt(GENERAL_PROMPTS_V1[prompt_style], example, rng, dbg=self.debug)
                 output = self.format_video_points(example)
                 metadata = example.get("metadata", {})
                 metadata["answer"] = output

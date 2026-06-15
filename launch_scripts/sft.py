@@ -605,6 +605,11 @@ def main():
     checkpoint = select_checkpoint(args.checkpoint)
     model_cfg = get_model(checkpoint, args.model)
 
+    # Video frames are sampled at the model's default max_fps=2 (frames at 0.0, 0.5, 1.0, ...),
+    # which matches the Molmo2 video point/track PRETRAINING convention. The gaze training data
+    # is realigned to 2 Hz to match, so frames and gaze timestamps coincide -- no gaze-specific
+    # fps override. (Override per run with `model.mm_preprocessor.video.max_fps=[N]` after `--`.)
+
     if args.debug:
         checkpoint = None
 
@@ -753,6 +758,22 @@ def main():
     )
 
     cfg.parallelism.context_parallel_config.degree = args.cp_degree
+
+    # Run the gaze inference eval on a single, NON-distributed model. Autoregressive
+    # generation under context parallelism (cp_degree>1) is pathologically slow -- every
+    # generated token needs a full ulysses-attention all-gather across the cp ranks, so a
+    # handful of eval examples can take 30+ minutes. distributed=False temporarily gathers
+    # the full (unsharded) model onto one GPU for generation, which the 4B model fits in
+    # 48GB. Only matters when CP is on; harmless otherwise.
+    if is_gaze and args.cp_degree > 1:
+        cfg.inf_eval_config.distributed = False
+        # The non-distributed eval gathers a full unsharded model onto one GPU for
+        # generation; offload the sharded training model AND its optimizer state to CPU
+        # first so they don't co-reside with the inference model and OOM when training
+        # resumes (seen at seq_len 12288 on 48GB L40, even with model-only offload, due to
+        # allocator fragmentation -- we also set expandable_segments in the launcher).
+        cfg.inf_eval_config.offload_model = True
+        cfg.inf_eval_config.offload_optim = True
 
     conf = OmegaConf.create(cfg)
     conf.merge_with_dotlist([clean_opt(arg) for arg in other_args])

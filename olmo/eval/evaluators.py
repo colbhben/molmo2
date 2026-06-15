@@ -2901,6 +2901,75 @@ class VixMoPointEval(Evaluator):
         return out
 
 
+def _render_gaze_video_html(video_path, clip, gt_triplets, pred_triplets,
+                            video_w, video_h, video_duration, max_side=384, fps_out=6):
+    """Render a clip with GT (green) + predicted (blue) gaze points overlaid per frame and
+    return an HTML5 <video> tag with the mp4 base64-embedded (so it plays inline in wandb).
+
+    gt/pred_triplets are (t_seconds, x_px, y_px) in the ORIGINAL video pixel space. We draw
+    each point on the frame nearest its timestamp (and keep it visible briefly after).
+    Returns None on any failure -- visualization must never break the eval.
+    """
+    try:
+        import decord
+        import imageio
+        from olmo.io import resource_path
+        from os.path import basename, dirname
+
+        path = resource_path(dirname(video_path), basename(video_path)).as_posix()
+        vr = decord.VideoReader(path, ctx=decord.cpu(0))
+        n = len(vr)
+        if n == 0:
+            return None
+        native_fps = float(vr.get_avg_fps()) or fps_out
+        # Sample up to ~fps_out frames/sec across the (clipped) span we actually scored.
+        start_s = (clip[0] if clip and clip[0] is not None else 0.0)
+        end_s = (clip[1] if clip and clip[1] is not None else (n / native_fps))
+        end_s = max(end_s, start_s + 1.0 / fps_out)
+        n_out = max(1, min(int((end_s - start_s) * fps_out), 64))
+        times = [start_s + (end_s - start_s) * i / max(n_out - 1, 1) for i in range(n_out)]
+        idxs = [min(n - 1, max(0, int(round(t * native_fps)))) for t in times]
+        frames = vr.get_batch(idxs).asnumpy()  # (n_out, H, W, 3)
+
+        H, W = frames.shape[1], frames.shape[2]
+        scale = min(1.0, max_side / max(H, W))
+        out_w, out_h = int(W * scale), int(H * scale)
+        # how the scored points (in video_w/video_h pixel space) map onto the actual frame.
+        sx, sy = out_w / float(video_w or W), out_h / float(video_h or H)
+
+        def draw_pts(img, triplets, color, t_lo, t_hi, r=6):
+            draw = ImageDraw.Draw(img)
+            for (t, x, y) in triplets:
+                if t is None:
+                    t = 0.0
+                if t_lo <= t < t_hi:
+                    cx, cy = x * sx, y * sy
+                    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=color, width=3)
+                    draw.line([cx - r, cy, cx + r, cy], fill=color, width=1)
+                    draw.line([cx, cy - r, cx, cy + r], fill=color, width=1)
+
+        rendered = []
+        for i, t in enumerate(times):
+            t_hi = times[i + 1] if i + 1 < len(times) else (t + 1.0 / fps_out)
+            img = Image.fromarray(frames[i]).convert("RGB")
+            if scale < 1.0:
+                img = img.resize((out_w, out_h))
+            # GT green, prediction blue; show points active in [t, t_hi).
+            draw_pts(img, gt_triplets or [], "lime", t, t_hi)
+            draw_pts(img, pred_triplets or [], "deepskyblue", t, t_hi)
+            rendered.append(np.asarray(img))
+
+        buf = io.BytesIO()
+        imageio.mimwrite(buf, rendered, format="mp4", fps=fps_out,
+                         codec="libx264", output_params=["-pix_fmt", "yuv420p"])
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return (f'<video controls loop style="max-height:360px;max-width:360px" '
+                f'src="data:video/mp4;base64,{b64}"></video>')
+    except Exception as e:
+        log.warning(f"gaze video render failed for {video_path}: {type(e).__name__}: {e}")
+        return None
+
+
 class GazePointEval(Evaluator):
     """Gaze video-point eval: L2 distance + accuracy@radius (no masks).
 
@@ -2932,6 +3001,8 @@ class GazePointEval(Evaluator):
             video_duration = metadata["video_duration"]
             video_h, video_w = metadata["video_height"], metadata["video_width"]
             if isinstance(pred, str):
+                # Gaze output is the native <points coords="t id x y;..."> tag (the pretraining
+                # format); parse it back to (t, x_px, y_px).
                 pred_abs_triplets = extract_multi_image_points(pred, image_w=video_w, image_h=video_h)
             else:
                 pred_abs_triplets = pred if isinstance(pred, list) else []
@@ -2972,13 +3043,32 @@ class GazePointEval(Evaluator):
 
         out = {k: mean_metric(v) for k, v in scores.items()}
         if self.n_to_log:
-            per_example = [{k: scores[k][i] for k in scores if i < len(scores[k])}
-                           for i in range(len(response_text))]
-            out["predictions"] = gather_examples_as_html(
-                self.n_to_log, tokenizer, metadatas, predictions, per_example,
-                pred_times_and_points=all_pred_triplets,
-                gt_times_and_points=all_gt_triplets,
-            )
+            # Build our own visualization table: one playable mp4 per example with GT
+            # (green) + predicted (blue) gaze points overlaid per frame, alongside the
+            # prediction text and per-example scores. We render on each rank for its share
+            # of `n_to_log`; the HtmlTable rows are gathered across ranks downstream.
+            n_here = min(self.n_to_log, len(response_text))
+            n_here = (n_here + get_world_size() - 1) // get_world_size()
+            rows = []
+            for ix in range(min(n_here, len(response_text))):
+                metadata = metadatas[ix]
+                row = {}
+                video_html = None
+                vpath = metadata.get("video_path")
+                if vpath:
+                    clip = (metadata.get("clip_start_time"), metadata.get("clip_end_time"))
+                    video_html = _render_gaze_video_html(
+                        vpath, clip,
+                        gt_triplets=all_gt_triplets[ix], pred_triplets=all_pred_triplets[ix],
+                        video_w=metadata.get("video_width"), video_h=metadata.get("video_height"),
+                        video_duration=metadata.get("video_duration", 1.0),
+                    )
+                # Per request: show ONLY the ground-truth annotation + the rendered video
+                # (GT green, prediction blue overlaid). No prediction-text / label / valid cols.
+                row["ground truth annotation"] = html_escape(str(metadata.get("label", "")))
+                row["video (GT=green, pred=blue)"] = video_html or "(no video)"
+                rows.append(row)
+            out["predictions"] = HtmlTable(rows)
         return out
 
 
