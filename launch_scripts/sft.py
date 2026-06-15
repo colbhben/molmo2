@@ -440,30 +440,107 @@ def get_training_mixture(name):
         # rehearsal data is weighted the way it was in pretraining-style SFT.
         point_weight = MessageWeight(weight=0.2, root_length=False, root_subsegments=False)
         cap_weight = MessageWeight(weight=0.1, root_length=False, root_subsegments=False)
-        # Rehearse submixture: a compact, representative slice of the general mixture spanning
-        # the core modalities (text instruction-following, image VQA, image+video pointing,
-        # video understanding, hardcodes). Internal weights are normalized within the group;
-        # the group as a whole gets `rehearse_w`. Override the group list by editing here.
-        rehearse_datasets = [
-            WeightedDataset("tulu4", sampling_rate=0.30),
-            WeightedDataset("pixmo_ask_model_anything", sampling_rate=0.15, message_weight=cap_weight),
-            WeightedDataset("chart_qa_weighted", sampling_rate=0.15),
-            WeightedDataset("pixmo_points_train", sampling_rate=0.15, message_weight=point_weight),
-            WeightedDataset("llava_video_mc_academic", sampling_rate=0.20),
-            WeightedDataset("molmo2_hardcodes", sampling_rate=0.05),
-        ]
+
+        # ------------------------------------------------------------------------------- #
+        # Rehearse submixture, organized by the Molmo2 paper's SFT data groups so the
+        # rehearsal slice preserves the model's general abilities in the paper's proportions.
+        #
+        # Paper group rates (Table: SFT data mixture):
+        #   Captions/Long QA 13.6% | Image QA 22.7% | Video QA 18.2% |
+        #   Image Pointing 9.1%   | Video Pointing 13.6% | Video Tracking 13.6% | NLP 9.1%
+        #
+        # We can only rehearse the groups whose datasets are actually present + loadable in
+        # this Molmo2-Data tree (it is bind-mounted READ-ONLY, and not every academic source
+        # ships its videos). Datasets were verified by constructing each in-container against
+        # the staged data; see training/REHEARSE_MIX.md for the full availability matrix.
+        #
+        # DROPPED group: Video Tracking -- every tracking loader (mevis/lv-vis/revos/moca/
+        # ref-davis/molmo2-track, in track/ground/single_point variants) materializes a
+        # processed cache *inside* MOLMO_DATA_DIR at load time, which fails on our read-only
+        # mount ("Read-only file system"). Its 13.6% is redistributed across the survivors by
+        # renormalizing the remaining group rates to sum to 1.0 (see PAPER_RATES below).
+        #
+        # Each group's `datasets` list is sampled internally by per-dataset sampling_rate
+        # (size-proportional unless a rate is given); the group as a whole receives its
+        # renormalized paper rate, and the whole rehearse block is then scaled by `rehearse_w`.
+        rehearse_groups = {
+            # Captions / Long QA -- PixMo caption + caption-QA + ask-model-anything.
+            "captions": [
+                WeightedDataset("pixmo_cap", sampling_rate=0.30, message_weight=cap_weight),
+                WeightedDataset("pixmo_cap_qa", sampling_rate=0.25, message_weight=cap_weight),
+                WeightedDataset("pixmo_cap_qa_as_user_qa", sampling_rate=0.20, message_weight=cap_weight),
+                WeightedDataset("pixmo_ask_model_anything", sampling_rate=0.25, message_weight=cap_weight),
+            ],
+            # Image QA -- open-source short-answer/MC VQA, the CoSyn synthetic-document sets
+            # the paper substitutes for PixMo-Docs, and a multi-image set (Mantis/NLVR2).
+            # Only datasets whose images traverse on this tree are kept (verified per-example):
+            #   - doc_qa / info_qa / st_qa / blink-train: absent from this tree.
+            #   - text_vqa: train_images/ not staged (FileNotFoundError on traversal).
+            #   - tally_qa: images point at an off-host /weka/... path that isn't mounted.
+            "image_qa": [
+                WeightedDataset("coco_2014_vqa_multi", sampling_rate=0.16),
+                WeightedDataset("okvqa", sampling_rate=0.06),
+                WeightedDataset("chart_qa_weighted", sampling_rate=0.12),
+                WeightedDataset("ai2_diagram_v2_mix_transparent", sampling_rate=0.08),
+                WeightedDataset("a_okvqa_mc", sampling_rate=0.05),
+                WeightedDataset("a_okvqa_da", sampling_rate=0.05),
+                WeightedDataset("science_qa_img", sampling_rate=0.05),
+                # CoSyn synthetic documents (paper uses CoSyn in place of PixMo-Docs).
+                WeightedDataset("cosyn_chart_exp", sampling_rate=0.09),
+                WeightedDataset("cosyn_table_exp", sampling_rate=0.06),
+                WeightedDataset("cosyn_document", sampling_rate=0.07),
+                WeightedDataset("cosyn_diagram_exp", sampling_rate=0.05),
+                WeightedDataset("cosyn_math_exp", sampling_rate=0.06),
+                # Multi-image QA (paper's open-source multi-image bucket).
+                WeightedDataset("mantis_instruct_nlvr2_multi_only", sampling_rate=0.10),
+            ],
+            # Image Pointing -- PixMo points + counts (high-count emphasis per the paper).
+            # (pixmo_points_train hits a None-vs-int bug in this snapshot; pixmo_multi_points
+            #  loads 0 rows; cosyn_point build times out -> we use the high_freq + count sets.)
+            "image_pointing": [
+                WeightedDataset("pixmo_points_high_freq_train", sampling_rate=0.60, message_weight=point_weight),
+                WeightedDataset("pixmo_count_train", sampling_rate=0.40, message_weight=point_weight),
+            ],
+            # NLP -- text-only Tulu SFT to preserve language understanding.
+            "nlp": [
+                WeightedDataset("tulu4", sampling_rate=1.0),
+            ],
+        }
+        # Paper group rates. Three groups are intentionally omitted because their data is not
+        # usable from this read-only, partially-staged Molmo2-Data tree (the video mp4s are
+        # still being extracted; verified by a per-example traversal probe, not just .load()):
+        #   - Video Tracking (13.6%): every tracking loader writes a processed cache *inside*
+        #     MOLMO_DATA_DIR at load time -> "Read-only file system".
+        #   - Video Pointing (13.6%): AcademicVideoPoint constructs fine but its examples
+        #     reference academic videos (mevis/lv-vis .../videos-2fps/*.mp4) that aren't staged.
+        #   - Video QA (18.2%): same story -- llava_video / clevrer / motionbench example
+        #     videos are almost entirely un-staged (0-15% present), so traversal FileNotFounds.
+        #     (The gaze task we specialize on IS itself video pointing, so the model still gets
+        #     ample video supervision from the 92% gaze group -- the dropped video rehearsal
+        #     costs the least while the mp4 extraction finishes.)
+        # The surviving rates are renormalized to sum to 1.0, spreading the dropped groups'
+        # share proportionally across the (image+text) groups we can actually train on. Restore
+        # each group here once its videos / a writable cache are staged; see
+        # training/REHEARSE_MIX.md for the full availability matrix and restore checklist.
+        PAPER_RATES = {
+            "captions": 0.136, "image_qa": 0.227,
+            "image_pointing": 0.091, "nlp": 0.091,
+        }
+        _rate_sum = sum(PAPER_RATES.values())
         training_mixture = [
             ["gaze", [WeightedDataset("gaze_video_point", sampling_rate=1.0,
                                       message_weight=point_weight)], gaze_w],
         ]
-        # Gaze-only: with GAZE_SPECIALIZE_RATIO=1.0 (rehearse_w==0) we DROP the rehearse group
-        # entirely instead of adding it with weight 0 -- otherwise its datasets are still
+        # Gaze-only: with GAZE_SPECIALIZE_RATIO=1.0 (rehearse_w==0) we DROP the rehearse groups
+        # entirely instead of adding them with weight 0 -- otherwise their datasets are still
         # constructed (and load_from_disk'd) just to be sampled at rate 0. This lets you
         # validate the gaze-only train path before the rehearsal SFT data is downloaded.
         if rehearse_w > 0:
-            training_mixture.append(["rehearse", rehearse_datasets, rehearse_w])
+            for gname, datasets in rehearse_groups.items():
+                group_w = rehearse_w * (PAPER_RATES[gname] / _rate_sum)
+                training_mixture.append([f"rehearse_{gname}", datasets, group_w])
         else:
-            print("GAZE_SPECIALIZE_RATIO=1.0: rehearse group dropped (gaze-only training).",
+            print("GAZE_SPECIALIZE_RATIO=1.0: rehearse groups dropped (gaze-only training).",
                   file=sys.stderr)
     else:
         raise NotImplementedError(name)
