@@ -75,6 +75,15 @@ from olmo.data.utils import maybe_download_and_unzip, maybe_download_file
 
 log = logging.getLogger(__name__)
 
+# H.264 encoder used to (re)build .mp4 clips from frames. Defaults to libx264,
+# which ships with virtually every ffmpeg build; override via MOLMO_FFMPEG_VCODEC
+# (e.g. "libopenh264" or "h264_nvenc") on hosts where a different encoder is
+# preferred or required.
+FFMPEG_VCODEC = os.environ.get("MOLMO_FFMPEG_VCODEC", "libx264")
+# Per-ffmpeg thread count. When many encodes run in parallel (n_procs workers),
+# pin each to 1 thread to avoid oversubscribing cores; "0" lets ffmpeg auto-pick.
+FFMPEG_THREADS = os.environ.get("MOLMO_FFMPEG_THREADS", "1")
+
 MAX_VIDEO_FPS = 10
 
 VIDEO_TRACK_DATA_HOME = join(VIDEO_DATA_HOME, "video_track")
@@ -162,7 +171,8 @@ def encode_frames_to_video(frames_dir, output_path, fps, native_fps:int=None,
         "-safe", "0",
         "-r", str(fps),
         "-i", filelist_path,
-        "-c:v", "libopenh264",
+        "-c:v", FFMPEG_VCODEC,
+        "-threads", FFMPEG_THREADS,
         "-b:v", "4M",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",

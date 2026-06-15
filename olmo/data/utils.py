@@ -136,7 +136,13 @@ def _download_file(url, filename):
             import gdown
         except ImportError:
             raise ImportError("Install gdown to download gdrive files")
-        gdown.download(url, filename, quiet=False, fuzzy=True)
+        import inspect
+        # gdown >= 6 removed the `fuzzy` kwarg (share-URL matching is now the
+        # always-on default). Only pass it on older gdown that still accepts it.
+        kwargs = {"quiet": False}
+        if "fuzzy" in inspect.signature(gdown.download).parameters:
+            kwargs["fuzzy"] = True
+        gdown.download(url, filename, **kwargs)
         return
 
     # Send a GET request to the URL

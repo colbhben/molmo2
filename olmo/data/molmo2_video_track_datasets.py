@@ -22,7 +22,8 @@ from olmo.data.academic_video_track_datasets import (
     _encode_frames_to_video_worker,
     _extract_frames_worker,
     _load_hf_dataset,
-    TrackingDataset, PointTrack
+    TrackingDataset, PointTrack,
+    FFMPEG_VCODEC,
 )
 
 from huggingface_hub import snapshot_download, hf_hub_download
@@ -75,7 +76,7 @@ def split_video_ffmpeg(input_video, output_video, start_sec, duration_sec):
         '-ss', str(start_sec),
         '-i', input_video,
         '-t', str(duration_sec),
-        '-c:v', 'libopenh264',
+        '-c:v', FFMPEG_VCODEC,
         '-b:v', '4M',
         '-pix_fmt', 'yuv420p',
         '-g', '60',
