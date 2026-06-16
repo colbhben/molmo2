@@ -477,22 +477,23 @@ def get_training_mixture(name):
             #   - doc_qa / info_qa / st_qa / blink-train: absent from this tree.
             #   - text_vqa: train_images/ not staged (FileNotFoundError on traversal).
             #   - tally_qa: images point at an off-host /weka/... path that isn't mounted.
+            # NOTE: CoSyn (the paper's synthetic-doc substitute for PixMo-Docs) is intentionally
+            # EXCLUDED. Its loader hardcodes PATH="allenai/CoSyn-400K" and always pulls from the
+            # HF Hub -- it cannot read from the staged /nfs Molmo2-Data like every other dataset.
+            # Under multi-node training every rank fetches it at dataloader-build time, blowing
+            # the HF org API quota (HTTP 429 on xet-read-token). Rather than depend on live HF in
+            # an otherwise fully-offline mixture, we drop it. To restore: pre-cache CoSyn to a
+            # shared HF cache and run with HF_HUB_OFFLINE=1.
             "image_qa": [
-                WeightedDataset("coco_2014_vqa_multi", sampling_rate=0.16),
-                WeightedDataset("okvqa", sampling_rate=0.06),
-                WeightedDataset("chart_qa_weighted", sampling_rate=0.12),
-                WeightedDataset("ai2_diagram_v2_mix_transparent", sampling_rate=0.08),
-                WeightedDataset("a_okvqa_mc", sampling_rate=0.05),
-                WeightedDataset("a_okvqa_da", sampling_rate=0.05),
-                WeightedDataset("science_qa_img", sampling_rate=0.05),
-                # CoSyn synthetic documents (paper uses CoSyn in place of PixMo-Docs).
-                WeightedDataset("cosyn_chart_exp", sampling_rate=0.09),
-                WeightedDataset("cosyn_table_exp", sampling_rate=0.06),
-                WeightedDataset("cosyn_document", sampling_rate=0.07),
-                WeightedDataset("cosyn_diagram_exp", sampling_rate=0.05),
-                WeightedDataset("cosyn_math_exp", sampling_rate=0.06),
+                WeightedDataset("coco_2014_vqa_multi", sampling_rate=0.24),
+                WeightedDataset("okvqa", sampling_rate=0.09),
+                WeightedDataset("chart_qa_weighted", sampling_rate=0.18),
+                WeightedDataset("ai2_diagram_v2_mix_transparent", sampling_rate=0.12),
+                WeightedDataset("a_okvqa_mc", sampling_rate=0.07),
+                WeightedDataset("a_okvqa_da", sampling_rate=0.07),
+                WeightedDataset("science_qa_img", sampling_rate=0.08),
                 # Multi-image QA (paper's open-source multi-image bucket).
-                WeightedDataset("mantis_instruct_nlvr2_multi_only", sampling_rate=0.10),
+                WeightedDataset("mantis_instruct_nlvr2_multi_only", sampling_rate=0.15),
             ],
             # Image Pointing -- PixMo points + counts (high-count emphasis per the paper).
             # (pixmo_points_train hits a None-vs-int bug in this snapshot; pixmo_multi_points
