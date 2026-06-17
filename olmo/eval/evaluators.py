@@ -3072,6 +3072,84 @@ class GazePointEval(Evaluator):
         return out
 
 
+class GazePointEvalCache(GazePointEval):
+    """GazePointEval that ALSO stashes per-episode prediction records for an S3 eval cache.
+
+    The aggregate metrics are computed by the parent unchanged; we additionally re-run the
+    same parse/normalize/match per example and keep the per-episode values (GT + predicted
+    triplets in side x side pixel space, plus per-episode l2 / acc@radius / valid). The
+    standalone gaze eval (launch_scripts/eval_gaze.py) reads ``self.episode_records`` after
+    calling this and writes a results.jsonl the gaze viewer ingests. Run with ``n_to_log=0``
+    so the wandb video-render path (decord/imageio) is skipped.
+    """
+
+    def __call__(self, metadatas, predictions, tokenizer, step=None):
+        out = super().__call__(metadatas, predictions, tokenizer, step)
+        self.episode_records = self._build_episode_records(metadatas, predictions)
+        return out
+
+    def _build_episode_records(self, metadatas, predictions):
+        response_text = predictions["predictions_text"]
+        records = []
+        for ex_ix, pred in enumerate(response_text):
+            metadata = metadatas[ex_ix]
+            gt_abs_triplets = metadata["gt_abs_triplets"]
+            video_duration = metadata["video_duration"]
+            video_h, video_w = metadata["video_height"], metadata["video_width"]
+            if isinstance(pred, str):
+                pred_abs_triplets = extract_multi_image_points(pred, image_w=video_w, image_h=video_h)
+            else:
+                pred_abs_triplets = pred if isinstance(pred, list) else []
+
+            n_gt = len(gt_abs_triplets)
+            n_pred = len(pred_abs_triplets)
+            metrics = {
+                "valid": float(n_pred > 0),
+                "n_gt": n_gt,
+                "n_pred": n_pred,
+                "l2": None,
+            }
+            for r in self.RADII:
+                metrics[f"acc@{r:g}"] = None
+            if n_gt > 0:
+                gt_norm = normalize_timestamps_and_points(
+                    gt_abs_triplets, video_duration=video_duration,
+                    video_h=video_h, video_w=video_w, upper_bound=100, num_decimals=3)
+                if n_pred == 0:
+                    for r in self.RADII:
+                        metrics[f"acc@{r:g}"] = 0.0
+                else:
+                    pred_norm = normalize_timestamps_and_points(
+                        pred_abs_triplets, video_duration=video_duration,
+                        video_h=video_h, video_w=video_w, upper_bound=100, num_decimals=3)
+                    pred_xy = np.array([[x, y] for _, x, y in pred_norm], dtype=np.float64)
+                    gt_xy = np.array([[x, y] for _, x, y in gt_norm], dtype=np.float64)
+                    dists = cdist(pred_xy, gt_xy)
+                    row_ind, col_ind = linear_sum_assignment(dists)
+                    matched = dists[row_ind, col_ind]
+                    metrics["l2"] = float(np.mean(matched)) if len(matched) else None
+                    for r in self.RADII:
+                        metrics[f"acc@{r:g}"] = float(int(np.sum(matched <= r)) / n_gt)
+
+            records.append({
+                "example_id": metadata.get("example_id"),
+                "dataset": metadata.get("dataset"),
+                "label": metadata.get("label", ""),
+                "frame_side": float(video_w) if video_w == video_h else None,
+                "video_width": video_w,
+                "video_height": video_h,
+                "video_duration": video_duration,
+                "clip_start_time": metadata.get("clip_start_time"),
+                "clip_end_time": metadata.get("clip_end_time"),
+                "video_path": metadata.get("video_path"),
+                "gt_triplets": [[float(t), float(x), float(y)] for t, x, y in gt_abs_triplets],
+                "pred_triplets": [[float(t), float(x), float(y)] for t, x, y in pred_abs_triplets],
+                "prediction_text": pred if isinstance(pred, str) else "",
+                "metrics": metrics,
+            })
+        return records
+
+
 class PointBenchEval(Evaluator):
     CATEGORIES = ["affordable", "counting", "reasoning", "spatial", "steerable"]
 
