@@ -187,7 +187,35 @@ def main():
     records = getattr(cache_eval, "episode_records", [])
     bundle = args.bundle_s3_uri.rstrip("/")
 
+    # The model's batch metadata may not carry video_path/label (older molmo2 gaze dataset).
+    # The joint manifest in GAZE_DATA_DIR is the source of truth: map example_id -> (video, label).
+    # video is a bundle-relative path (e.g. videos/<dataset>/<file>.mp4) -> video_s3_uri = bundle/<video>.
+    id_to_video, id_to_label = {}, {}
+    gaze_dir = os.environ.get("GAZE_DATA_DIR")
+    manifest_path = os.path.join(gaze_dir, "joint", "manifest.jsonl") if gaze_dir else None
+    if manifest_path and os.path.exists(manifest_path):
+        with open(manifest_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                rid = row.get("id")
+                if not rid:
+                    continue
+                if row.get("video"):
+                    id_to_video[rid] = row["video"]
+                md = row.get("metadata") or {}
+                label = md.get("final_annotation") or md.get("annotation_text")
+                if label:
+                    id_to_label[rid] = label
+
     def _video_s3_uri(rec):
+        rid = rec.get("example_id")
+        rel = id_to_video.get(rid)
+        if rel:
+            return f"{bundle}/{rel.lstrip('/')}"
+        # Fallback: derive from the absolute video_path if the dataset provided one.
         vp = rec.get("video_path") or ""
         ds = rec.get("dataset") or ""
         return f"{bundle}/videos/{ds}/{basename(vp)}" if vp else None
@@ -198,7 +226,7 @@ def main():
         out = {
             "example_id": rec["example_id"],
             "dataset": rec["dataset"],
-            "label": rec["label"],
+            "label": rec["label"] or id_to_label.get(rec["example_id"], ""),
             "frame_side": rec["frame_side"],
             "video_duration": rec["video_duration"],
             "clip_start_time": rec["clip_start_time"],
