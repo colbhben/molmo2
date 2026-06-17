@@ -484,16 +484,19 @@ def get_training_mixture(name):
             # the HF org API quota (HTTP 429 on xet-read-token). Rather than depend on live HF in
             # an otherwise fully-offline mixture, we drop it. To restore: pre-cache CoSyn to a
             # shared HF cache and run with HF_HUB_OFFLINE=1.
+            # AI2D dropped: load_from_disk()+.filter() writes a cache file BACK INTO
+            # MOLMO_DATA_DIR/torch_datasets/academic_datasets/ai2d -- on this cluster that
+            # tree is on a read-only /nfs (s3-fuse) mount, so the filter write fails with
+            # PermissionError. Rescale rest to sum 1.0 (each old wt / 0.88).
             "image_qa": [
-                WeightedDataset("coco_2014_vqa_multi", sampling_rate=0.24),
-                WeightedDataset("okvqa", sampling_rate=0.09),
-                WeightedDataset("chart_qa_weighted", sampling_rate=0.18),
-                WeightedDataset("ai2_diagram_v2_mix_transparent", sampling_rate=0.12),
-                WeightedDataset("a_okvqa_mc", sampling_rate=0.07),
-                WeightedDataset("a_okvqa_da", sampling_rate=0.07),
-                WeightedDataset("science_qa_img", sampling_rate=0.08),
+                WeightedDataset("coco_2014_vqa_multi", sampling_rate=0.27),
+                WeightedDataset("okvqa", sampling_rate=0.10),
+                WeightedDataset("chart_qa_weighted", sampling_rate=0.20),
+                WeightedDataset("a_okvqa_mc", sampling_rate=0.08),
+                WeightedDataset("a_okvqa_da", sampling_rate=0.08),
+                WeightedDataset("science_qa_img", sampling_rate=0.10),
                 # Multi-image QA (paper's open-source multi-image bucket).
-                WeightedDataset("mantis_instruct_nlvr2_multi_only", sampling_rate=0.15),
+                WeightedDataset("mantis_instruct_nlvr2_multi_only", sampling_rate=0.17),
             ],
             # Image Pointing -- PixMo points + counts (high-count emphasis per the paper).
             # (pixmo_points_train hits a None-vs-int bug in this snapshot; pixmo_multi_points
